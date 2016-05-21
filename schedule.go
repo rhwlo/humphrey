@@ -1,4 +1,4 @@
-package bart
+package humphrey
 
 import (
 	"encoding/xml"
@@ -43,6 +43,31 @@ type bartSchedDocument struct {
 	Schedules []Schedule `xml:"schedules>schedule"`
 }
 
+type stationScheduleResponse struct {
+	XMLName xml.Name `xml:"root"`
+	Trains  []Train  `xml:"station>item"`
+}
+
+// Train represents the train items in the response from `stnsched`
+type Train struct {
+	Line            string
+	Origin          Station
+	Time            time.Time
+	DestinationTime time.Time
+	Index           int
+	BikeFlag        int
+}
+
+type intermediateTrain struct {
+	XMLName         xml.Name `xml:"item"`
+	Line            string   `xml:"line,attr"`
+	Origin          string   `xml:"trainHeadStation,attr"`
+	Time            string   `xml:"origTime,attr"`
+	DestinationTime string   `xml:"destTime,attr"`
+	Index           int      `xml:"trainIdx,attr"`
+	BikeFlag        int      `xml:"bikeflag,attr"`
+}
+
 // A TrainSchedule represents the BART XML <train>
 type TrainSchedule struct {
 	XMLName xml.Name        `xml:"train"`
@@ -55,8 +80,14 @@ type ScheduledStop struct {
 	XMLName  xml.Name `xml:"stop"`
 	Station  string   `xml:"station,attr"`
 	Time     string   `xml:"origTime,attr"`
-	BikeFlag string   `xml:"bikeFlag,attr"`
+	BikeFlag int      `xml:"bikeFlag,attr"`
 }
+
+const (
+	effectiveTimeFormat   = "01/02/2006 03:04 PM"
+	originTimeFormat      = "3:04 PM"
+	destinationTimeFormat = "3:04 PM"
+)
 
 // UnmarshalXML unmarshals the Schedule by way of an intermediate struct
 func (s *Schedule) UnmarshalXML(xmlDecoder *xml.Decoder, startEl xml.StartElement) error {
@@ -66,10 +97,30 @@ func (s *Schedule) UnmarshalXML(xmlDecoder *xml.Decoder, startEl xml.StartElemen
 		return err
 	}
 	s.Number = i.Number
-	s.EffectiveDate, err = time.Parse("01/02/2006 03:04 PM", i.EffectiveDate)
+	s.EffectiveDate, err = time.Parse(effectiveTimeFormat, i.EffectiveDate)
 	if err != nil {
-		return fmt.Errorf("parsing a time for schedule %d: %v", s.Number, err)
+		return fmt.Errorf("parsing <effectiveDate> %v: %v", i.EffectiveDate, err)
 	}
+	return nil
+}
+
+// UnmarshalXML unmarshals the Train by way of an intermediate struct
+func (t *Train) UnmarshalXML(xmlDecoder *xml.Decoder, startEl xml.StartElement) error {
+	var i intermediateTrain
+	err := xmlDecoder.DecodeElement(&i, &startEl)
+	if err != nil {
+		return err
+	}
+	t.Time, err = time.Parse(originTimeFormat, i.Time)
+	if err != nil {
+		return fmt.Errorf("parsing origTime %v: %v", i.Time, err)
+	}
+	t.DestinationTime, err = time.Parse(originTimeFormat, i.DestinationTime)
+	if err != nil {
+		return fmt.Errorf("parsing destTime %v: %v", i.DestinationTime, err)
+	}
+	t.Line, t.Index, t.BikeFlag = i.Line, i.Index, i.BikeFlag
+	t.Origin = Station{Abbreviation: i.Origin}
 	return nil
 }
 
@@ -106,21 +157,12 @@ func (c *Client) GetCurrentSchedules() ([]Schedule, error) {
 	return schedResponse.Schedules, nil
 }
 
-// GetAllRouteSchedulesBySchedules returns all routes for the slice of Schedules given.
-func (c *Client) GetAllRouteSchedulesBySchedules(schedules []Schedule) ([]RouteSchedule, error) {
-	var routeSchedules []RouteSchedule
-	for _, schedule := range schedules {
-		routes, err := c.GetRoutesBySchedule(schedule)
-		if err != nil {
-			return nil, fmt.Errorf("getting routes for schedule #%d: %v", schedule.Number, err)
-		}
-		for _, route := range routes {
-			routeSchedule, err := c.GetRouteScheduleBySchedule(route.Number, schedule.Number)
-			if err != nil {
-				return nil, fmt.Errorf("getting a route schedule for schedule #%d: %v", schedule.Number, err)
-			}
-			routeSchedules = append(routeSchedules, routeSchedule)
-		}
+// GetStationSchedule returns a slice of TrainSchedules for the given station
+func (c *Client) GetStationSchedule(station Station) ([]Train, error) {
+	var response stationScheduleResponse
+	err := c.MakeRequest("sched", "stnsched", url.Values{"orig": []string{station.Abbreviation}}, &response)
+	if err != nil {
+		return nil, fmt.Errorf("making 'stnsched' request for %s: %v", station.Abbreviation, err)
 	}
-	return routeSchedules, nil
+	return response.Trains, nil
 }
